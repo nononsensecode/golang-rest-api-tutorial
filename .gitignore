@@ -1,0 +1,2 @@
+# Do not save db files to git
+*.db

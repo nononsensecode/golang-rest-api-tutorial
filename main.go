@@ -1,15 +1,33 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
+	"nononsensecode/rest-api-tutorial/articleerror"
 	model "nononsensecode/rest-api-tutorial/model"
+	utils "nononsensecode/rest-api-tutorial/utils"
+	"strconv"
 
 	"github.com/gorilla/mux"
+	_ "github.com/mattn/go-sqlite3"
 )
+
+func init() {
+	var err error
+	model.DB, err = sql.Open("sqlite3", "./article.db")
+	if err != nil {
+		log.Fatal("DB cannot be opened!", err)
+	}
+
+	err = model.CreateTable()
+	if err != nil {
+		log.Fatal("Table cannot be created", err)
+	}
+}
 
 func homePage(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "Welcome to the HomePage!")
@@ -18,54 +36,101 @@ func homePage(w http.ResponseWriter, r *http.Request) {
 
 func returnAllArticles(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Endpoint Hit: returnAllArticles")
-	json.NewEncoder(w).Encode(model.Articles)
+	articles, err := model.FindAllArticles()
+	if err != nil {
+		log.Panic(err)
+		utils.RespondWithError(w, http.StatusInternalServerError, "Unknown error")
+	}
+	utils.RespondWithJSON(w, http.StatusOK, articles)
 }
 
 func returnArticleByID(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Endpoint Hit: returnArticleByID")
 	vars := mux.Vars(r)
-	id := vars["id"]
-
-	for _, article := range model.Articles {
-		if article.ID == id {
-			json.NewEncoder(w).Encode(article)
+	id, err := strconv.ParseInt(vars["id"], 10, 64)
+	if err != nil {
+		utils.RespondWithError(w, http.StatusBadRequest, "Invalid ID!")
+	}
+	
+	article, err := model.FindArticleByID(id)
+	if err != nil {
+		articleError, ok := err.(*articleerror.ArticleError)
+		if ok {
+			switch{
+			case articleError.IsArticleEmpty():
+				utils.RespondWithError(w, http.StatusNotFound, articleError.Error())
+			default:
+				utils.RespondWithError(w, http.StatusInternalServerError, "Unknown error occurred")
+			}
+			log.Println(err)
+			return
 		}
 	}
+	utils.RespondWithJSON(w, http.StatusOK, article)
 }
 
 func createArticle(w http.ResponseWriter, r *http.Request) {
-	requestBody, _ := ioutil.ReadAll(r.Body)
+	requestBody, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		utils.RespondWithError(w, http.StatusBadRequest, "Request is not readable")
+		log.Println(err)
+	}
+	
 	var article model.Article
-	json.Unmarshal(requestBody, &article)
-	model.Articles = append(model.Articles, article)
-	json.NewEncoder(w).Encode(article)
+	err = json.Unmarshal(requestBody, &article)
+	if err != nil {
+		utils.RespondWithError(w, http.StatusBadRequest, "Request cannot be converted")
+		log.Println(err)
+	}
+
+	articleID, err := model.CreateArticle(article)
+	if err != nil {
+		utils.RespondWithError(w, http.StatusInternalServerError, "Article cannot be created")
+	}
+	article.ID = articleID
+
+	utils.RespondWithJSON(w, http.StatusCreated, article)
 }
 
 func deleteArticleByID(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Hit endpoint deleteArticleByID")
 	vars := mux.Vars(r)
-	id := vars["id"]
-	for index, article := range model.Articles {
-		if article.ID == id {
-			model.Articles = append(model.Articles[:index], model.Articles[index+1:]...)
-		}
+	id, err := strconv.ParseInt(vars["id"], 10, 64)
+	if err != nil {		
+		utils.RespondWithError(w, http.StatusBadRequest, "ID is invalid")
 	}
+	
+	err = model.DeleteArticleByID(id)
+	if err != nil {
+		message := fmt.Sprintf("Article with ID %d cannot be deleted", id)
+		utils.RespondWithError(w, http.StatusInternalServerError, message)
+	}
+
+	utils.RespondWithJSON(w, http.StatusNoContent, model.Article{})
 }
 
 func updateArticle(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Hit endpoint updateArticle")
-	requestBody, _ := ioutil.ReadAll(r.Body)
-	var updatedArticle model.Article
-	json.Unmarshal(requestBody, &updatedArticle)
-	for index, article := range model.Articles {
-		if article.ID == updatedArticle.ID {
-			originalArticle := &model.Articles[index]
-			originalArticle.Title = updatedArticle.Title
-			originalArticle.Content = updatedArticle.Content
-			originalArticle.Desc = updatedArticle.Desc
-			json.NewEncoder(w).Encode(originalArticle)
-		}
+	requestBody, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		utils.RespondWithError(w, http.StatusBadRequest, "Request is not readable")
+		log.Println(err)
 	}
+
+	var updatedArticle model.Article
+	err = json.Unmarshal(requestBody, &updatedArticle)
+	if err != nil {
+		utils.RespondWithError(w, http.StatusBadRequest, "Request cannot be converted")
+		log.Println(err)
+	}
+
+	article, err := model.UpdateArticle(updatedArticle)
+	if err != nil {
+		utils.RespondWithError(w, http.StatusInternalServerError, "Article cannot be updated due to unknown error")
+		log.Panic(err)
+	}
+	utils.RespondWithJSON(w, http.StatusOK, article)
+
 }
 
 func handleRequests() {
@@ -83,10 +148,6 @@ func handleRequests() {
 	log.Fatal(http.ListenAndServe(":10000", myRouter))
 }
 
-func main() {
-	model.Articles = []model.Article{
-		{ID: "1", Title: "Hello", Desc: "Article Description", Content: "Article Content"},
-		{ID: "2", Title: "Hello 2", Desc: "Article Description", Content: "Article Content"},
-	}
+func main() {	
 	handleRequests()
 }
